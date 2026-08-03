@@ -18,7 +18,7 @@ IWDG 기반 자동 복구 구조를 구현하고 반복 테스트로 안정성�
 
 
 
-\## Tech Stack
+\# Tech Stack
 
 
 
@@ -33,4 +33,30 @@ IWDG 기반 자동 복구 구조를 구현하고 반복 테스트로 안정성�
 \- RTOS : Queue, Event Flag, Stream Buffer, Direct Task Notification
 
 \- Protocol : Binary Frame, CRC-16/CCITT-FALSE, Timeout, Retry, Duplicate Cache
+
+
+
+
+
+\# Key Results
+
+
+
+\- UART Binary Protocol 자동 테스트 11개 구현
+
+\- 10회 반복 실행, 총 110/110 테스트 통과
+
+\- 정상 패킷 140개 처리 중 중복 요청 20개 감지 및 응답 재전송
+
+\- 오류 주입 테스트: CRC 오류 10회, Parser Timeout 10회 정상 복구
+
+\- UART RX Drop 0회, TX Queue Failure 0회
+
+\- FreeRTOS Free Heap 및 Minimum Free Heap 5,464Byte 유지
+
+\- HC-SR04 ECHO 단선 시 Sensor Invalid 감지 후 재연결 자동 복구
+
+\- appTask 정지 시 IWDG Reset 및 `RESET CAUSE: IWDG` 확인
+
+\- 부팅 시 RTOS 객체, OLED, EEPROM, RTC, 센서 Self-Test 전체 PASS
 
