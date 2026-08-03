@@ -618,3 +618,390 @@ flowchart LR
 UART 송신처럼 요청 순서, Buffer 수명, 완료 이벤트를 함께 관리해야 하는 기능은  
 전용 Task 하나만 실제 하드웨어에 접근하도록 제한하는 Single Writer 구조가  
 책임 분리와 디버깅 측면에서 더 적합하다는 것을 확인했습니다.
+
+## 검증 및 테스트
+
+기능 동작 확인에 그치지 않고 정상 요청, 잘못된 요청, 통신 오류, 하드웨어 단선,  
+Task 정지 상황을 직접 발생시켜 시스템의 처리 및 복구 동작을 검증했습니다.
+
+### Binary Protocol 자동 테스트
+
+Python과 `pyserial`을 이용해 요청 Packet 생성, CRC 계산, 응답 수신,  
+응답 내용 검증을 자동화했습니다.
+
+| 번호 | 테스트 항목 | 검증 내용 |
+|---:|---|---|
+| 1 | PING | `PING` 요청에 대해 `PONG` 응답 수신 |
+| 2 | 상태 조회 | 거리값과 센서 유효 상태가 포함된 `STATUS` 응답 확인 |
+| 3 | LED ON | Binary 명령을 통한 LED ON 제어 |
+| 4 | LED OFF | Binary 명령을 통한 LED OFF 제어 |
+| 5 | 잘못된 LED Payload | 허용되지 않은 값에 대해 `INVALID_PAYLOAD` 응답 |
+| 6 | 알 수 없는 Type | 정의되지 않은 명령에 대해 `UNKNOWN_TYPE` 응답 |
+| 7 | 응답 유실 및 Retry | 첫 응답을 유실시킨 뒤 동일 Sequence로 재전송 |
+| 8 | 동일 요청 재전송 | 명령을 다시 실행하지 않고 Cached Response 재전송 |
+| 9 | 동일 Sequence, 다른 Payload | 중복 요청이 아닌 새로운 요청으로 처리 |
+| 10 | 잘못된 CRC 후 복구 | 손상 Packet 폐기 후 다음 정상 Packet 처리 |
+| 11 | 불완전 Packet Timeout | 부분 Packet 폐기 후 다음 정상 Packet 처리 |
+
+11개의 테스트를 10회 반복 실행해 총 110개의 테스트를 수행했습니다.
+
+```text
+총 테스트 결과: 110/110 PASS
+```
+
+### 통신 오류 주입 결과
+
+10회 반복 테스트 후 누적 통계는 다음과 같습니다.
+
+```text
+VALID 140 | DUPLICATE 20
+CRC ERROR 10 | TIMEOUT 10 | RX DROP 0 | TX FAIL 0
+```
+
+- CRC가 손상된 Packet 10개를 모두 검출하고 실행하지 않음
+- 불완전 Packet 10개를 Timeout 처리한 뒤 Parser 정상 복구
+- 중복 요청 20개를 감지하고 Cached Response 재전송
+- UART 수신 Byte 유실 0회
+- UART TX Queue 등록 실패 0회
+
+### 센서 단선 및 자동 복구 테스트
+
+HC-SR04의 ECHO 신호선을 분리해 센서 입력 이상 상황을 만들었습니다.
+
+```text
+ECHO 단선
+→ 거리 데이터 Invalid 판정
+→ 시스템의 다른 Task와 UART 명령은 계속 동작
+→ ECHO 재연결
+→ 정상 거리 측정 자동 복구
+```
+
+센서 하나의 이상으로 전체 시스템이 정지하지 않고,  
+재연결 후 별도의 Reset 없이 정상 상태로 돌아오는 것을 확인했습니다.
+
+### Watchdog 복구 테스트
+
+디버그 명령으로 `appTask`를 강제로 정지시키고  
+해당 Task의 Health Bit가 더 이상 보고되지 않도록 했습니다.
+
+```text
+appTask 정지
+→ HEALTH_APP 미보고
+→ watchdogTask가 IWDG Refresh 중단
+→ IWDG Reset 발생
+→ 시스템 재부팅
+→ RESET CAUSE: IWDG 확인
+```
+
+주요 Task가 정상적으로 동작하지 않을 때 Watchdog이 단순히 계속 갱신되지 않고,  
+실제로 시스템을 재부팅해 복구하는 것을 확인했습니다.
+
+### 부팅 Self-Test
+
+시스템 시작 시 주요 RTOS 객체와 연결 장치의 준비 상태를 검사합니다.
+
+```text
+=== SYSTEM SELF TEST ===
+[SELF TEST] RTOS OBJECTS : PASS
+[SELF TEST] OLED 0x3C    : PASS
+[SELF TEST] EEPROM 0x57  : PASS
+[SELF TEST] RTC 0x68     : PASS
+[SELF TEST] SENSOR       : PASS
+[SELF TEST] RESULT       : PASS
+========================
+```
+
+센서 데이터가 아직 준비되지 않은 경우에는 즉시 고장으로 판단하지 않고  
+`WAIT` 상태로 구분하도록 구성했습니다.
+
+### 메모리 안정성 확인
+
+반복 테스트 전후 FreeRTOS Heap과 각 Task의 Stack 여유를 확인했습니다.
+
+```text
+FREE HEAP     : 5,464Byte
+MIN FREE HEAP : 5,464Byte
+```
+
+10회 반복 테스트 이후에도 현재 Free Heap과 Minimum Free Heap이 동일하게 유지돼  
+반복 실행 중 지속적으로 Heap이 감소하는 현상이 없음을 확인했습니다.
+
+주요 Task의 최소 Stack 여유도 함께 측정했습니다.
+
+| Task | 최소 Stack 여유 |
+|---|---:|
+| `appTask` | 330Word |
+| `heartbeatTask` | 96Word |
+| `consumerTask` | 76Word |
+| `eventTask` | 24Word |
+| `monitorTask` | 22Word |
+| `commandTask` | 99Word |
+| `watchdogTask` | 58Word |
+| `uartTxTask` | 160Word |
+
+현재 기능에서는 Stack Overflow가 발생하지 않았으며,  
+향후 기능 추가 시 `eventTask`와 `monitorTask`의 Stack 사용량을 우선적으로 다시 측정할 예정입니다.
+
+
+## 현재 한계와 향후 개선 계획
+
+### 현재 한계
+
+#### 1. 최근 요청 1개만 Cache
+
+현재 중복 요청 방지는 가장 최근에 처리한 요청과 응답 한 쌍만 저장합니다.
+
+따라서 여러 요청이 짧은 시간에 연속으로 처리된 뒤 이전 요청이 다시 도착하면,  
+Cache에서 제거된 요청은 새로운 요청으로 처리될 수 있습니다.
+
+#### 2. 일부 주요 Task만 Watchdog Health 확인
+
+현재 `appTask`, `consumerTask`, `monitorTask`의 Health Bit를 확인한 뒤  
+조건을 만족한 경우에만 IWDG를 갱신합니다.
+
+`commandTask`, `uartTxTask` 등 모든 Task를 개별적으로 감시하는 구조는 아니므로,  
+향후 각 Task의 실행 주기와 역할에 맞는 Health Timeout을 적용할 필요가 있습니다.
+
+#### 3. 통신 통계는 RAM에서만 관리
+
+`VALID`, `DUPLICATE`, `CRC ERROR`, `TIMEOUT`, `RX DROP`, `TX FAIL` 통계는  
+현재 실행 중인 RAM Counter로 관리합니다.
+
+따라서 전원이 꺼지거나 Watchdog Reset이 발생하면 누적 통계가 초기화됩니다.
+
+#### 4. 테스트 환경이 단일 보드와 UART 연결 중심
+
+자동 테스트는 NUCLEO-F401RE 한 대와 PC의 UART 연결 환경에서 수행했습니다.
+
+다음과 같은 환경까지는 아직 충분히 검증하지 못했습니다.
+
+- 장시간 연속 운전
+- UART Byte 무작위 손상 및 유실
+- TX Queue가 가득 찬 상태
+- 매우 짧은 간격의 연속 Packet 입력
+- 전원 변동과 센서 노이즈가 큰 환경
+- 서보모터 부하가 포함된 장시간 전원 안정성
+
+#### 5. 일부 Task의 Stack 여유가 상대적으로 작음
+
+현재 기능에서는 Stack Overflow가 발생하지 않았지만,  
+`eventTask`와 `monitorTask`의 최소 Stack 여유가 각각 24Word와 22Word로 측정됐습니다.
+
+해당 Task에 지역변수, 문자열 처리, 로그 출력 기능을 추가할 경우  
+Stack 사용량을 다시 측정해야 합니다.
+
+### 향후 개선 계획
+
+#### 1. 다중 Transaction Cache 구현
+
+최근 요청 한 개만 저장하는 방식에서 확장해 여러 Transaction을 보관하고,  
+Sequence와 요청 내용을 기준으로 일정 시간 동안 중복 여부를 판단하도록 개선할 예정입니다.
+
+각 Cache 항목에는 다음 정보를 저장할 수 있습니다.
+
+- 요청 Type
+- Sequence
+- Payload
+- 생성 시각
+- Encoded Response
+- 유효 시간
+
+#### 2. 전체 Task Health Monitoring
+
+각 Task가 자신의 실행 상태를 주기적으로 보고하고,  
+Watchdog Task가 Task별 허용 시간을 개별적으로 검사하도록 확장할 예정입니다.
+
+```text
+Task별 마지막 Health 보고 시각 저장
+→ 현재 Tick과 비교
+→ 허용 시간 초과 Task 식별
+→ 오류 로그 저장
+→ IWDG Refresh 중단
+```
+
+이를 통해 Reset 발생 전 어떤 Task가 정상적으로 동작하지 않았는지  
+더 구체적으로 확인할 수 있습니다.
+
+#### 3. EEPROM 기반 설정 및 오류 기록
+
+현재 RAM에서만 관리하는 통신 통계와 Reset 정보를  
+EEPROM에 저장하도록 개선할 예정입니다.
+
+저장 데이터에는 Version과 CRC를 함께 기록해  
+데이터 형식 변경과 저장 데이터 손상도 확인할 수 있도록 구성할 계획입니다.
+
+#### 4. Protocol 자동 테스트 확대
+
+현재 11개의 기능 및 오류 테스트에서 다음 항목을 추가할 예정입니다.
+
+- 무작위 Byte를 입력하는 Parser Fuzz Test
+- Payload 최대 길이와 경계값 검사
+- 연속 Packet 처리 시험
+- Stream Buffer Overflow 유도 시험
+- TX Queue 포화 시험
+- Sequence 순환 구간 시험
+- 장시간 반복 통신 시험
+
+#### 5. Host 환경 Unit Test
+
+CRC 계산, Packet Encode, Parser State Machine처럼  
+하드웨어 의존성이 낮은 기능을 별도 모듈로 분리해 PC 환경에서도  
+Unit Test를 실행할 수 있도록 개선할 예정입니다.
+
+이를 통해 실제 보드 연결 없이도 Protocol 로직의 변경 사항을  
+빠르게 검증할 수 있습니다.
+
+#### 6. Stack과 Heap 최적화
+
+기능을 추가하기 전에 각 Task의 High Water Mark를 다시 측정하고,  
+특히 여유가 작은 `eventTask`와 `monitorTask`를 우선적으로 점검할 예정입니다.
+
+단순히 Stack 크기를 줄이는 것이 아니라, 최악 조건에서 필요한 사용량을 측정한 뒤  
+안전 여유를 포함해 Stack 크기를 결정할 계획입니다.
+
+## 빌드 및 실행 방법
+
+### 개발 환경
+
+- Windows 11
+- STM32CubeIDE
+- STM32CubeMX
+- NUCLEO-F401RE 내장 ST-LINK
+- PuTTY 또는 UART Serial Terminal
+- Python 3 
+
+### 프로젝트 가져오기
+
+저장소를 Clone합니다.
+
+```bash
+git clone https://github.com/Gun98/STM32-FreeRTOS-Sensor-Controller.git
+```
+
+STM32CubeIDE에서 다음 순서로 프로젝트를 가져옵니다.
+
+```text
+File
+→ Import
+→ General
+→ Existing Projects into Workspace
+→ Clone한 프로젝트 폴더 선택
+→ Finish
+```
+
+프로젝트 설정은 `HCSR04_DISTANCE.ioc` 파일에서 확인할 수 있습니다.
+
+### 빌드
+
+STM32CubeIDE에서 프로젝트를 선택한 뒤 다음 방법으로 빌드합니다.
+
+```text
+Project
+→ Build Project
+```
+
+또는 상단의 망치 모양 Build 버튼을 사용합니다.
+
+빌드가 정상적으로 완료되면 Console에서 다음 결과를 확인합니다.
+
+```text
+0 errors
+```
+
+### 보드에 다운로드
+
+1. NUCLEO-F401RE를 USB로 PC에 연결합니다.
+2. STM32CubeIDE에서 Run 또는 Debug를 실행합니다.
+3. 내장 ST-LINK를 통해 Firmware를 보드에 다운로드합니다.
+4. Reset 후 부팅 로그와 Self-Test 결과를 확인합니다.
+
+### UART 연결
+
+USART2는 NUCLEO 보드의 ST-LINK Virtual COM Port를 통해 PC와 연결됩니다.
+
+Serial Terminal 설정은 다음과 같습니다.
+
+```text
+Port         : 장치 관리자에서 확인한 ST-LINK COM Port
+Baud Rate    : CubeMX의 USART2 설정값과 동일하게 설정
+Data Bits    : 8
+Parity       : None
+Stop Bits    : 1
+Flow Control : None
+```
+
+현재 개발 환경에서는 `COM7`을 사용했지만,  
+PC 연결 상태에 따라 COM Port 번호는 달라질 수 있습니다.
+
+## 주요 Text 명령어
+
+### Self-Test 결과 확인
+
+```text
+SELF TEST
+```
+
+RTOS 객체, OLED, EEPROM, RTC, 센서의 준비 상태를 다시 검사합니다.
+
+예시:
+
+```text
+=== SYSTEM SELF TEST ===
+[SELF TEST] RTOS OBJECTS : PASS
+[SELF TEST] OLED 0x3C    : PASS
+[SELF TEST] EEPROM 0x57  : PASS
+[SELF TEST] RTC 0x68     : PASS
+[SELF TEST] SENSOR       : PASS
+[SELF TEST] RESULT       : PASS
+========================
+```
+
+### Binary Protocol 통계 확인
+
+```text
+PKT STAT
+```
+
+다음 통계를 확인할 수 있습니다.
+
+```text
+VALID 140 | DUPLICATE 20
+CRC ERROR 10 | TIMEOUT 10 | RX DROP 0 | TX FAIL 0
+```
+
+### Watchdog 복구 시험
+
+```text
+FAULT WATCHDOG
+```
+
+이 명령은 디버깅 목적으로 `appTask`의 정상 실행을 중단해  
+IWDG Reset이 실제로 발생하는지 확인합니다.
+
+```text
+FAULT WATCHDOG 입력
+→ appTask Health 미보고
+→ IWDG Refresh 중단
+→ Watchdog Reset
+→ 시스템 재부팅
+→ RESET CAUSE: IWDG 출력
+```
+
+> `FAULT WATCHDOG`는 의도적으로 시스템 Reset을 발생시키는 시험용 명령입니다.
+
+## 프로젝트 실행 확인 순서
+
+```text
+1. 보드와 주변장치 배선 확인
+2. STM32CubeIDE에서 Build
+3. ST-LINK를 이용해 Firmware 다운로드
+4. UART Terminal 연결
+5. 부팅 Self-Test 결과 확인
+6. 센서 거리값과 OLED 출력 확인
+7. SELF TEST 명령 실행
+8. Python Binary Protocol 자동 테스트 실행
+9. PKT STAT 통계 확인
+10. 필요 시 센서 단선 및 Watchdog 복구 시험 수행
+```
+
+
