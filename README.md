@@ -94,3 +94,29 @@ STM32 주변장치 제어 실습에서 출발해, 여러 기능이 동시에 동
 - 센서 단선과 Task 이상 발생 후 시스템이 자동 복구되어야 함
 - Heap, Stack, RX Drop, TX Queue Failure를 측정해 안정성 확인
 
+
+## 하드웨어 구성
+
+| 부품 | 인터페이스 / 핀 | 용도 |
+|---|---|---|
+| NUCLEO-F401RE | STM32F401RET6, 84MHz | 메인 제어 보드 |
+| HC-SR04 | TRIG: PB5, ECHO: PA6 / TIM3_CH1 | 초음파 거리 측정 |
+| SSD1306 OLED | I2C1 PB8/PB9, 주소 0x3C | 센서값과 시스템 상태 표시 |
+| DS3231 RTC | I2C1 PB8/PB9, 주소 0x68 | 날짜 및 시간 정보 제공 |
+| DS3231 EEPROM | I2C1 PB8/PB9, 주소 0x57 | I2C 장치 확인 및 저장장치 인터페이스 |
+| KY-006 부저 | PB6 / TIM4_CH1 | PWM 경고음 출력 |
+| SG90 서보모터 | PB10 / TIM2_CH3 | 50Hz PWM 위치 제어 |
+| NUCLEO LD2 | PA5 | Text 및 Binary 명령을 통한 LED 제어 |
+| 사용자 버튼 | PC13 / EXTI | 외부 인터럽트 입력 |
+| UART2 VCP | PA2 TX, PA3 RX | Text 명령, Binary Protocol, 디버그 로그 |
+| USB 로직 애널라이저 | UART, I2C, PWM 신호선 | 통신 및 PWM 파형 검증 |
+
+### 배선 및 전기적 고려사항
+
+- 모든 모듈과 NUCLEO 보드는 GND를 공통으로 연결했습니다.
+- HC-SR04는 5V 전원을 사용했습니다.
+- HC-SR04의 ECHO 신호는 약 5V이므로, 10kΩ 2개의 저항을 이용한 전압 분배 회로를 거쳐 약 3.3V로 낮춘 뒤 PA6에 입력했습니다.
+- OLED, RTC, EEPROM은 I2C1 버스를 공유하도록 구성했습니다.
+- I2C1 통신 속도는 100kHz로 설정했습니다.
+- 서보모터 제어 신호는 50Hz PWM을 사용했습니다.
+- 외부 전원으로 서보모터를 구동할 경우, 외부 전원의 GND와 NUCLEO의 GND를 공통으로 연결해야 합니다.
