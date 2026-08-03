@@ -514,3 +514,107 @@ Retry는 단순히 같은 Packet을 다시 보내는 기능만으로 끝나지 �
 
 또한 요청 식별에는 Sequence만 사용하는 것보다  
 Type, Length, Payload까지 함께 비교해야 안전하다는 것을 확인했습니다.
+
+### 3. 여러 Task의 UART 송신을 Single Writer 구조로 통합
+
+#### 문제 상황
+
+센서 로그, 상태 출력, 명령 응답 등 여러 Task에서 UART 송신이 필요해지면서  
+각 Task가 직접 `HAL_UART_Transmit_DMA()`를 호출할 경우 다음 문제가 발생할 수 있었습니다.
+
+- 이전 DMA 송신이 끝나기 전에 새로운 송신 요청 발생
+- `HAL_BUSY` 반환으로 메시지 누락
+- 송신 Buffer가 DMA 완료 전에 변경되는 문제
+- 여러 로그와 Binary Frame이 섞이는 문제
+- 송신 완료를 기다리는 코드가 각 Task에 중복되는 문제
+
+특히 Text 로그와 Binary Protocol 응답을 동시에 지원하면서  
+송신 순서와 Buffer 수명을 한곳에서 관리할 필요가 있었습니다.
+
+#### 원인 분석
+
+UART와 DMA는 여러 Task가 동시에 독립적으로 사용할 수 있는 자원이 아닙니다.
+
+각 Task가 UART 상태를 개별적으로 확인하고 송신하면  
+Task 전환 시점에 따라 UART 사용 상태가 달라질 수 있으며,  
+송신 완료 처리와 다음 송신 시작 순서도 복잡해집니다.
+
+Mutex로 UART 접근만 보호할 수도 있지만, 각 Task가 DMA 완료까지 기다리면  
+송신 관리 코드가 여러 위치에 분산되고 Task의 Blocking 시간이 증가할 수 있다고 판단했습니다.
+
+#### 수정 방법
+
+UART 송신을 담당하는 전용 `uartTxTask`를 만들고,  
+다른 Task는 UART HAL 함수를 직접 호출하지 않도록 구성했습니다.
+
+```text
+여러 Task
+→ UartTxMessage_t 생성
+→ uartTxQueue 등록
+→ uartTxTask가 순서대로 수신
+→ HAL_UART_Transmit_DMA() 실행
+→ DMA 완료 ISR
+→ Direct Task Notification
+→ 다음 메시지 송신
+```
+
+송신 요청은 길이와 실제 데이터를 함께 가진 구조체로 Queue에 복사합니다.
+
+```c
+typedef struct
+{
+    uint16_t length;
+    char data[160];
+} UartTxMessage_t;
+```
+
+이를 통해 호출한 Task의 지역 Buffer가 사라지거나 변경되더라도  
+Queue에 복사된 데이터는 송신 완료까지 안전하게 유지됩니다.
+
+DMA 송신 완료 Callback에서는 복잡한 처리를 하지 않고  
+`uartTxTask`에 Direct Task Notification만 전달하도록 구성했습니다.
+
+#### 적용 구조
+
+- `uartTxQueue` 길이: 4개
+- 메시지 최대 크기: 160Byte
+- 실제 UART DMA 호출 주체: `uartTxTask` 하나
+- DMA 완료 전달 방식: Direct Task Notification
+- Queue 등록 실패 시 `TX FAIL` 통계 증가
+
+```mermaid
+flowchart LR
+    APP[appTask] --> TXQ[uartTxQueue]
+    CMD[commandTask] --> TXQ
+    MON[monitorTask] --> TXQ
+    PROTOCOL[Binary Protocol] --> TXQ
+
+    TXQ --> TXTASK[uartTxTask]
+    TXTASK -->|HAL_UART_Transmit_DMA| DMA[USART2 TX DMA]
+    DMA -->|송신 완료 Callback| NOTIFY[Direct Task Notification]
+    NOTIFY --> TXTASK
+```
+
+#### 검증 방법
+
+- Text 로그와 Binary Protocol 응답을 함께 발생시켜 송신 상태 확인
+- Python Binary Protocol 자동 테스트 11개를 10회 반복
+- `PKT STAT` 명령으로 TX Queue 등록 실패 횟수 확인
+- FreeRTOS Stack과 Heap 사용량을 함께 확인
+
+#### 검증 결과
+
+- 자동 테스트 총 110/110 통과
+- UART TX Queue Failure 0회
+- UART RX Drop 0회
+- Binary Frame 응답 순서 정상 유지
+- 반복 시험 후 Free Heap과 Minimum Free Heap 5,464Byte 유지
+- `uartTxTask` Stack 여유 160Word 확인
+
+#### 배운 점
+
+공유 자원 문제는 단순히 Mutex를 추가하는 것만이 해결책은 아니라는 점을 배웠습니다.
+
+UART 송신처럼 요청 순서, Buffer 수명, 완료 이벤트를 함께 관리해야 하는 기능은  
+전용 Task 하나만 실제 하드웨어에 접근하도록 제한하는 Single Writer 구조가  
+책임 분리와 디버깅 측면에서 더 적합하다는 것을 확인했습니다.
