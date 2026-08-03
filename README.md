@@ -38,7 +38,7 @@ IWDG 기반 자동 복구 구조를 구현하고 반복 테스트로 안정성�
 
 
 
-\# Key Results
+\# 주요 결과
 
 
 
@@ -59,4 +59,38 @@ IWDG 기반 자동 복구 구조를 구현하고 반복 테스트로 안정성�
 \- appTask 정지 시 IWDG Reset 및 `RESET CAUSE: IWDG` 확인
 
 \- 부팅 시 RTOS 객체, OLED, EEPROM, RTC, 센서 Self-Test 전체 PASS
+
+## 프로젝트 목표
+
+STM32 주변장치 제어 실습에서 출발해, 여러 기능이 동시에 동작하는 환경에서
+데이터 전달, 통신 오류 처리, 자원 관리, 장애 복구까지 경험할 수 있는
+펌웨어 시스템을 구현하는 것을 목표로 했습니다.
+
+현재 기능은 Bare-metal 구조로도 구현할 수 있지만, 센서 처리, 명령 파싱,
+출력 제어, 상태 모니터링, UART DMA 송신의 실행 책임과 Blocking 영향을
+분리하기 위해 FreeRTOS 기반 구조로 확장했습니다.
+
+## 시스템 요구사항
+
+### 기능적 요구사항
+
+- HC-SR04 거리 데이터를 주기적으로 측정하고 유효성을 판정
+- OLED와 UART를 통해 센서 및 시스템 상태 제공
+- UART Text Command와 Binary Protocol 동시 지원
+- Binary 명령을 통한 상태 조회 및 LED 제어
+- RTC, OLED, EEPROM 등 I2C 장치의 부팅 Self-Test
+- 버튼 입력, LED, Buzzer, PWM 출력 등 주변장치 제어
+
+### 신뢰성 요구사항
+
+- UART RX ISR에서는 수신 Byte 저장과 재수신 등록만 수행
+- Stream Buffer를 이용해 ISR과 명령 처리 Task 분리
+- UART 송신은 전용 Task만 수행하는 Single Writer 구조 사용
+- CRC-16을 이용해 손상된 Binary Packet 거부
+- 불완전 Packet은 Parser Timeout 후 폐기하고 정상 수신 상태로 복구
+- 응답 유실 시 동일 Sequence로 Retry
+- 동일 요청 재수신 시 명령을 다시 실행하지 않고 Cached Response 재전송
+- Task Health 상태를 확인한 경우에만 IWDG Refresh
+- 센서 단선과 Task 이상 발생 후 시스템이 자동 복구되어야 함
+- Heap, Stack, RX Drop, TX Queue Failure를 측정해 안정성 확인
 
