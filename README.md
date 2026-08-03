@@ -120,3 +120,56 @@ STM32 주변장치 제어 실습에서 출발해, 여러 기능이 동시에 동
 - I2C1 통신 속도는 100kHz로 설정했습니다.
 - 서보모터 제어 신호는 50Hz PWM을 사용했습니다.
 - 외부 전원으로 서보모터를 구동할 경우, 외부 전원의 GND와 NUCLEO의 GND를 공통으로 연결해야 합니다.
+
+## 소프트웨어 아키텍처
+
+센서 처리, 명령 수신, 장치 제어, 상태 모니터링, UART 송신의 실행 책임을
+각 Task로 분리했습니다. Task 간 데이터는 전역변수에 직접 의존하기보다
+Queue, Event Flag, Stream Buffer, Direct Task Notification을 이용해 전달합니다.
+
+### 주요 Task 구성
+
+| Task | 우선순위 | 주요 역할 | 사용 RTOS 객체 |
+|---|---|---|---|
+| `appTask` | Normal | 애플리케이션 주기 실행, 센서 Snapshot 생성 및 전달 | `counterQueue`, `healthEvent` |
+| `commandTask` | Normal | UART Text 명령 처리, Binary Packet 파싱, 제어 요청 생성 | `uartRxStreamBuffer`, `controlQueue` |
+| `eventTask` | Below Normal | 버튼 및 명령으로 전달된 LED 제어 요청 처리 | `controlQueue`, `systemEvent` |
+| `consumerTask` | Below Normal | 센서 메시지 수신 및 센서 유효 상태 반영 | `counterQueue`, `systemEvent`, `healthEvent` |
+| `monitorTask` | Low | 주기 이벤트와 버튼 이벤트 확인, 시스템 상태 로그 출력 | `systemEvent`, `healthEvent` |
+| `uartTxTask` | Normal | UART TX Queue를 단독 소비하고 DMA 송신 수행 | `uartTxQueue`, Direct Notification |
+| `watchdogTask` | Normal | 주요 Task의 Health Bit를 확인한 경우에만 IWDG 갱신 | `healthEvent` |
+
+### 전체 데이터 흐름
+
+```mermaid
+flowchart LR
+    RXISR[USART2 RX ISR] -->|수신 Byte| RXSB[Stream Buffer 64Byte]
+    RXSB --> CMD[commandTask]
+
+    CMD --> TXT[Text Command 처리]
+    CMD --> BIN[Binary Packet Parser]
+    CMD -->|LED 제어 요청| CQ[controlQueue]
+
+    BTN[PC13 EXTI ISR] -->|Toggle 요청| CQ
+    CQ --> EVT[eventTask]
+    EVT --> LED[PA5 LED]
+    EVT -->|EVENT_BUTTON| SE[systemEvent]
+
+    APP[appTask] -->|SensorMessage_t / 200ms| SQ[counterQueue]
+    SQ --> CONS[consumerTask]
+    CONS -->|EVENT_SENSOR_VALID| SE
+
+    TIMER[Software Timer] -->|EVENT_TIMER_TICK| SE
+    SE --> MON[monitorTask]
+
+    APP -->|HEALTH_APP| HE[healthEvent]
+    CONS -->|HEALTH_SENSOR| HE
+    MON -->|HEALTH_MONITOR| HE
+    HE --> WD[watchdogTask]
+    WD --> IWDG[IWDG Refresh 또는 Reset]
+
+    TASKS[여러 Task의 UART 송신 요청] --> TXQ[uartTxQueue]
+    TXQ --> TXTASK[uartTxTask]
+    TXTASK -->|UART DMA| UART[USART2]
+    UART -->|DMA 완료 ISR| NOTIFY[Direct Notification]
+    NOTIFY --> TXTASK
