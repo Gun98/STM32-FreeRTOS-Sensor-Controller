@@ -1,0 +1,36 @@
+# STM32CubeIDE build directories
+Debug/
+Release/
+
+# Compiled files
+*.o
+*.obj
+*.d
+*.su
+*.cyclo
+*.elf
+*.map
+*.list
+*.bin
+*.hex
+*.srec
+
+# Static and shared libraries
+*.a
+*.lib
+*.so
+*.dll
+
+# IDE-generated launch configurations
+*.launch
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary and backup files
+*~
+*.tmp
+*.bak
+*.swp
