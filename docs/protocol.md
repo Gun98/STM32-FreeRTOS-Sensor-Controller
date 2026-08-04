@@ -2,21 +2,15 @@
 
 
 
-\## UART Binary Protocol
+STM32와 PC 사이에서 Text 명령과 함께 사용할 수 있도록 길이 기반 Binary Protocol을 구현했습니다.
 
 
 
-Text 명령과 별도로 길이 기반 Binary Protocol을 구현했습니다.
+문자열 종료 문자에 의존하지 않고 `Length` 필드를 기준으로 Payload를 처리하며, CRC-16, Parser Timeout, Retry, 중복 요청 방지를 적용했습니다.
 
 
 
-문자열 종료 문자에 의존하지 않고 `Length` 필드를 기준으로 Payload를 처리하며,  
-
-CRC-16, Parser Timeout, Retry, 중복 요청 방지를 적용해 통신 신뢰성을 높였습니다.
-
-
-
-\### Packet 구조
+\## Packet 구조
 
 
 
@@ -52,19 +46,49 @@ AA 55 | VERSION | TYPE | SEQUENCE | LENGTH | PAYLOAD | CRC\_LOW CRC\_HIGH
 
 
 
-CRC 계산 대상에는 SOF를 제외한 다음 필드를 포함합니다.
+\## Length 기반 Packet 처리
+
+
+
+Binary Payload에는 문자열 종료 문자인 `\\r`, `\\n`, `\\0`과 동일한 값이 정상 데이터로 포함될 수 있습니다.
+
+
+
+따라서 종료 문자를 기준으로 Packet 끝을 판단하지 않고, `Length` 필드에 기록된 크기만큼 Payload를 수신한 뒤 CRC를 확인하도록 구성했습니다.
 
 
 
 ```text
 
-VERSION + TYPE + SEQUENCE + LENGTH + PAYLOAD
+SOF 탐색
+
+→ Header 수신
+
+→ Length 확인
+
+→ Length만큼 Payload 수신
+
+→ CRC Low 수신
+
+→ CRC High 수신
+
+→ CRC 검증
+
+→ Packet Handler 실행
 
 ```
 
 
 
-\### CRC 설정
+최대 Payload 크기는 32Byte로 제한했습니다.
+
+
+
+Length가 허용 범위를 초과하면 Packet을 실행하지 않고 Parser를 초기 상태로 되돌립니다.
+
+
+
+\## CRC 설정
 
 
 
@@ -76,19 +100,59 @@ VERSION + TYPE + SEQUENCE + LENGTH + PAYLOAD
 
 \- \*\*Final XOR:\*\* `0x0000`
 
-\- \*\*Input/Output Reflection:\*\* 사용하지 않음
+\- \*\*Input Reflection:\*\* 사용하지 않음
+
+\- \*\*Output Reflection:\*\* 사용하지 않음
 
 \- \*\*전송 순서:\*\* Low Byte 먼저 전송
 
 
 
-SOF는 Parser가 Packet 경계를 탐색하는 용도로 사용하고,  
-
-실제 Packet 내용의 무결성은 Version부터 Payload까지 검증하도록 구분했습니다.
+CRC 계산 대상은 SOF를 제외한 다음 영역입니다.
 
 
 
-\### 요청 Packet
+```text
+
+VERSION + TYPE + SEQUENCE + LENGTH + PAYLOAD
+
+```
+
+
+
+SOF는 Parser가 Packet 시작 위치를 탐색하기 위한 경계 값으로 사용하고, 실제 Packet 내용의 무결성은 Version부터 Payload까지 검증하도록 구분했습니다.
+
+
+
+\### CRC 검증 예시
+
+
+
+다음 데이터의 CRC 계산 결과는 `0xC637`입니다.
+
+
+
+```text
+
+01 01 10 00
+
+```
+
+
+
+전송 시 Low Byte를 먼저 보내므로 실제 CRC Byte 순서는 다음과 같습니다.
+
+
+
+```text
+
+37 C6
+
+```
+
+
+
+\## 요청 Packet
 
 
 
@@ -104,7 +168,7 @@ SOF는 Parser가 Packet 경계를 탐색하는 용도로 사용하고,
 
 
 
-\### 응답 Packet
+\## 응답 Packet
 
 
 
@@ -122,7 +186,7 @@ SOF는 Parser가 Packet 경계를 탐색하는 용도로 사용하고,
 
 
 
-\### Error Code
+\## Error Code
 
 
 
@@ -144,7 +208,7 @@ SOF는 Parser가 Packet 경계를 탐색하는 용도로 사용하고,
 
 
 
-\### Binary Packet 처리 흐름
+\## Binary Packet 처리 흐름
 
 
 
@@ -152,43 +216,43 @@ SOF는 Parser가 Packet 경계를 탐색하는 용도로 사용하고,
 
 flowchart LR
 
-&#x20;   UART\[USART2 RX ISR] -->|1Byte 수신| SB\[Stream Buffer]
+&#x20;   UART\["USART2 RX ISR"] -->|"수신 Byte"| SB\["Stream Buffer"]
 
-&#x20;   SB --> CMD\[commandTask]
+&#x20;   SB --> CMD\["commandTask"]
 
-&#x20;   CMD --> PARSER\[Binary Parser State Machine]
-
-
-
-&#x20;   PARSER -->|CRC 정상| HANDLER\[Packet Handler]
-
-&#x20;   PARSER -->|CRC 오류| CRCERR\[CRC Error Count 증가]
-
-&#x20;   PARSER -->|100ms 초과| TIMEOUT\[Parser 초기화 및 Timeout Count 증가]
+&#x20;   CMD --> PARSER\["Binary Parser State Machine"]
 
 
 
-&#x20;   HANDLER --> DUP{이전 요청과 동일한가?}
+&#x20;   PARSER -->|"CRC 정상"| HANDLER\["Packet Handler"]
+
+&#x20;   PARSER -->|"CRC 오류"| CRCERR\["CRC Error Count 증가"]
+
+&#x20;   PARSER -->|"100ms 초과"| TIMEOUT\["Parser 초기화 및 Timeout Count 증가"]
 
 
 
-&#x20;   DUP -->|예| CACHE\[Cached Response 재전송]
-
-&#x20;   DUP -->|아니오| EXEC\[요청 검증 및 명령 처리]
+&#x20;   HANDLER --> DUP{"이전 요청과 동일한가?"}
 
 
 
-&#x20;   EXEC --> PING\[PING 처리]
+&#x20;   DUP -->|"예"| CACHE\["Cached Response 재전송"]
 
-&#x20;   EXEC --> STATUS\[Sensor Snapshot 조회]
-
-&#x20;   EXEC --> LED\[controlQueue에 LED 요청]
-
-&#x20;   EXEC --> ERROR\[Error Response 생성]
+&#x20;   DUP -->|"아니오"| EXEC\["요청 검증 및 명령 처리"]
 
 
 
-&#x20;   PING --> RESP\[응답 Frame 생성]
+&#x20;   EXEC --> PING\["PING 처리"]
+
+&#x20;   EXEC --> STATUS\["Sensor Snapshot 조회"]
+
+&#x20;   EXEC --> LED\["controlQueue에 LED 요청"]
+
+&#x20;   EXEC --> ERROR\["Error Response 생성"]
+
+
+
+&#x20;   PING --> RESP\["응답 Frame 생성"]
 
 &#x20;   STATUS --> RESP
 
@@ -198,31 +262,27 @@ flowchart LR
 
 
 
-&#x20;   RESP --> STORE\[요청과 응답 Cache 저장]
+&#x20;   RESP --> STORE\["요청과 응답 Cache 저장"]
 
-&#x20;   STORE --> TXQ\[uartTxQueue]
+&#x20;   STORE --> TXQ\["uartTxQueue"]
 
 &#x20;   CACHE --> TXQ
 
 
 
-&#x20;   TXQ --> TXTASK\[uartTxTask]
+&#x20;   TXQ --> TXTASK\["uartTxTask"]
 
-&#x20;   TXTASK --> DMA\[UART DMA 송신]
+&#x20;   TXTASK --> DMA\["UART DMA 송신"]
 
 ```
 
 
 
-\## 통신 오류 처리
+\## CRC 오류 처리
 
 
 
-\### 1. CRC 오류 검출
-
-
-
-수신 완료된 Packet의 CRC를 계산한 뒤 수신 CRC와 비교합니다.
+수신 완료된 Packet의 CRC를 계산한 뒤 수신된 CRC와 비교합니다.
 
 
 
@@ -242,41 +302,69 @@ CRC가 일치하지 않으면 다음과 같이 처리합니다.
 
 
 
-손상된 명령이 실제 장치 제어로 이어지지 않도록 검증과 실행 단계를 분리했습니다.
+손상된 Packet이 실제 LED 제어 또는 상태 처리로 이어지지 않도록 검증 단계와 실행 단계를 분리했습니다.
 
 
 
-\### 2. 불완전 Packet Timeout
+```text
+
+CRC 정상
+
+→ Packet Handler 실행
 
 
 
-SOF 수신 후 Packet이 완성되지 않은 상태가 100ms 이상 지속되면  
+CRC 오류
 
-부분 Packet을 폐기하고 Parser를 초기 상태로 되돌립니다.
+→ Packet 폐기
 
+→ 오류 통계 증가
 
+→ Parser 초기화
 
-`commandTask`는 Stream Buffer를 최대 20ms 동안 대기하며,  
-
-수신 데이터가 없더라도 `UartProtocol\_CheckTimeout()`을 호출해  
-
-Parser Timeout을 검사합니다.
+```
 
 
 
-이를 통해 중간에 끊긴 Packet 때문에 다음 정상 Packet까지  
-
-잘못 해석되는 문제를 방지했습니다.
+\## 불완전 Packet Timeout
 
 
 
-\### 3. 응답 유실 시 Retry
+SOF 수신 후 Packet이 완성되지 않은 상태가 100ms 이상 지속되면 부분 Packet을 폐기하고 Parser를 초기 상태로 되돌립니다.
 
 
 
-Python 테스트 프로그램은 응답이 0.5초 안에 도착하지 않으면  
+`commandTask`는 Stream Buffer를 최대 20ms 동안 대기하며, 수신 데이터가 없더라도 `UartProtocol\_CheckTimeout()`을 호출해 Parser Timeout을 검사합니다.
 
-동일 요청을 최대 3회까지 재전송합니다.
+
+
+```text
+
+SOF 수신
+
+→ Packet 일부만 수신
+
+→ 100ms 동안 완성되지 않음
+
+→ Timeout Count 증가
+
+→ 부분 Packet 폐기
+
+→ 다음 정상 Packet 수신 대기
+
+```
+
+
+
+이를 통해 중간에 끊긴 Packet 때문에 다음 정상 Packet까지 계속 잘못 해석되는 문제를 방지했습니다.
+
+
+
+\## 응답 유실 시 Retry
+
+
+
+Python 테스트 프로그램은 요청 전송 후 응답이 0.5초 안에 도착하지 않으면 동일한 요청을 최대 3회까지 재전송합니다.
 
 
 
@@ -294,27 +382,27 @@ Retry 시에는 새로운 Sequence를 만들지 않고 기존 Sequence를 유지
 
 
 
-동일한 Sequence를 사용해야 MCU가 같은 논리적 요청의 재전송인지  
-
-판단할 수 있습니다.
+동일한 Sequence를 사용해야 MCU가 같은 논리적 요청의 재전송인지 판단할 수 있습니다.
 
 
 
-\### 4. 중복 명령 실행 방지
+\## 중복 요청 실행 방지
 
 
 
-Retry 요청을 그대로 다시 실행하면 LED 제어와 같은 명령이  
-
-두 번 수행될 수 있습니다.
+첫 번째 요청이 MCU에서 이미 처리됐지만 응답만 유실된 경우, PC는 동일한 요청을 다시 전송합니다.
 
 
 
-이를 방지하기 위해 가장 최근의 요청과 응답 Frame을 Cache에 저장합니다.
+이 Retry Packet을 새로운 명령으로 다시 실행하면 LED 제어와 같은 명령이 중복 수행될 수 있습니다.
 
 
 
-다음 항목이 모두 같을 때 중복 요청으로 판단합니다.
+이를 방지하기 위해 가장 최근에 처리한 요청과 해당 응답 Frame을 Cache에 저장했습니다.
+
+
+
+다음 항목이 모두 같을 때 동일한 요청으로 판단합니다.
 
 
 
@@ -330,15 +418,13 @@ Retry 요청을 그대로 다시 실행하면 LED 제어와 같은 명령이
 
 
 
-중복 요청이면 Packet Handler의 명령 처리 코드를 다시 실행하지 않고,  
-
-저장된 응답 Frame만 재전송합니다.
+중복 요청이면 Packet Handler의 명령 처리 코드를 다시 실행하지 않고 저장된 응답 Frame만 재전송합니다.
 
 
 
 ```text
 
-첫 번째 요청
+신규 요청
 
 → 명령 실행
 
@@ -346,35 +432,53 @@ Retry 요청을 그대로 다시 실행하면 LED 제어와 같은 명령이
 
 → 요청과 응답 Cache 저장
 
+→ 응답 전송
+
 
 
 동일 요청 Retry
 
-→ 중복 요청 감지
+→ Cache와 요청 비교
 
-→ 명령 재실행하지 않음
+→ 명령 재실행 생략
 
-→ Cached Response만 재전송
+→ Cached Response 재전송
 
 ```
 
 
 
-Sequence가 같더라도 Payload가 다르면 새로운 요청으로 처리합니다.
+Sequence가 같더라도 Type, Length 또는 Payload가 다르면 새로운 요청으로 처리합니다.
 
 
 
-\### 5. UART 송신 실패 측정
+\## UART 송신 경로
 
 
 
-모든 Binary Frame 송신은 공통 Queue 함수를 거치도록 구성했습니다.
+Binary 응답 Frame은 여러 Task가 UART HAL 함수를 직접 호출하지 않고 `uartTxQueue`를 통해 전용 `uartTxTask`에 전달합니다.
 
 
 
-`uartTxQueue` 등록에 실패하면 `TX FAIL` 카운터를 증가시켜  
+```text
 
-송신 경로의 오류 발생 여부를 확인할 수 있도록 했습니다.
+Packet Handler
+
+→ 응답 Frame 생성
+
+→ uartTxQueue 등록
+
+→ uartTxTask 수신
+
+→ UART DMA 송신
+
+→ DMA 완료 Notification
+
+```
+
+
+
+Queue 등록에 실패하면 `TX FAIL` 카운터를 증가시켜 송신 경로의 오류를 확인할 수 있도록 구성했습니다.
 
 
 
@@ -382,7 +486,7 @@ Sequence가 같더라도 Payload가 다르면 새로운 요청으로 처리합�
 
 
 
-PuTTY에서 다음 명령으로 누적 통계를 확인할 수 있습니다.
+PuTTY에서 다음 Text 명령으로 누적 통계를 확인할 수 있습니다.
 
 
 
@@ -412,7 +516,7 @@ PKT STAT
 
 
 
-10회 반복 테스트 후 측정 결과는 다음과 같습니다.
+Python 자동 테스트 11개를 10회 반복한 뒤 측정한 결과는 다음과 같습니다.
 
 
 
@@ -426,9 +530,59 @@ CRC ERROR 10 | TIMEOUT 10 | RX DROP 0 | TX FAIL 0
 
 
 
-UART Binary Protocol
+\## 자동 테스트 항목
 
-통신 오류 처리
 
-통신 진단 통계
+
+| 번호 | 테스트 항목 | 검증 내용 |
+
+|---:|---|---|
+
+| 1 | PING | `PING` 요청에 대한 `PONG` 응답 확인 |
+
+| 2 | 상태 조회 | 거리값과 센서 유효 상태 응답 확인 |
+
+| 3 | LED ON | Binary 명령을 통한 LED ON 제어 |
+
+| 4 | LED OFF | Binary 명령을 통한 LED OFF 제어 |
+
+| 5 | 잘못된 LED Payload | `INVALID\_PAYLOAD` 응답 확인 |
+
+| 6 | 알 수 없는 Type | `UNKNOWN\_TYPE` 응답 확인 |
+
+| 7 | 응답 유실 및 Retry | 첫 응답 유실 후 동일 Sequence 재전송 |
+
+| 8 | 동일 요청 재전송 | 명령 재실행 없이 Cached Response 재전송 |
+
+| 9 | 동일 Sequence, 다른 Payload | 새로운 요청으로 처리 |
+
+| 10 | 잘못된 CRC 후 복구 | 손상 Packet 폐기 후 정상 Packet 처리 |
+
+| 11 | 부분 Packet Timeout | Timeout 후 다음 정상 Packet 처리 |
+
+
+
+```text
+
+11개 테스트 × 10회 반복
+
+총 결과: 110/110 PASS
+
+```
+
+
+
+\## 현재 한계
+
+
+
+현재 중복 요청 Cache는 가장 최근 Transaction 한 개만 저장합니다.
+
+
+
+여러 요청이 처리된 이후 과거 요청이 다시 도착하면 Cache에서 이미 제거됐기 때문에 새로운 요청으로 처리될 수 있습니다.
+
+
+
+향후에는 여러 Transaction을 일정 시간 동안 보관하는 다중 Cache 구조로 확장할 수 있습니다.
 
