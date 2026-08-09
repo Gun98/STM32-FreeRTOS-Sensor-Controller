@@ -10,7 +10,6 @@
 
 #include "main.h"
 #include "app_types.h"
-#include "cmsis_os2.h"
 
 
 typedef struct
@@ -34,21 +33,6 @@ void App_Init(const AppHardware_t *hardware);
 
 void App_Run(void);
 
-HAL_StatusTypeDef App_UartTransmit(
-    const char *message);
-
 uint8_t App_GetSensorSnapshot(SensorMessage_t *message);
 
-
-
-void App_SetUartTxQueue(
-    osMessageQueueId_t queue);
-
-HAL_StatusTypeDef App_UartTransmit(
-    const char *message);
-
 #endif /* INC_APP_H_ */
-
-HAL_StatusTypeDef App_UartTransmitBytes(
-    const uint8_t *data,
-    uint16_t length);

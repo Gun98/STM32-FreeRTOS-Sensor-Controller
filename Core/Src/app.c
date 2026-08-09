@@ -8,7 +8,6 @@
 #include "app.h"
 
 #include <stdio.h>
-#include <string.h>
 
 #include "app_types.h"
 #include "buzzer.h"
@@ -18,6 +17,8 @@
 #include "distance_filter.h"
 #include "ssd1306.h"
 #include "fonts.h"
+#include "self_test.h"
+#include "uart_tx.h"
 
 #define TASK_SENSOR_PERIOD_MS          200U
 #define TASK_RTC_PERIOD_MS            1000U
@@ -34,9 +35,6 @@
 
 #define CAUTION_ENTER_TENTH_CM          190U
 #define CAUTION_EXIT_TENTH_CM           210U
-
-static I2C_HandleTypeDef *app_i2c = NULL;
-static UART_HandleTypeDef *app_uart = NULL;
 
 static SystemState_t system_state = SYSTEM_SENSOR_ERROR;
 
@@ -60,11 +58,6 @@ static uint8_t app_initialized = 0U;
 
 
 
-static osMessageQueueId_t app_uart_tx_queue =
-    NULL;
-
-
-
 static const char *SystemState_ToString(SystemState_t state);
 static void Sensor_RegisterFailure(void);
 static void SystemState_UpdateWithHysteresis(uint32_t distance);
@@ -73,7 +66,6 @@ static void RTC_Task(uint32_t now);
 static void Display_Task(uint32_t now);
 static void Logger_Task(uint32_t now);
 static void Scheduler_Run(void);
-static void App_RunStartupSelfTest(void);
 
 static const char *SystemState_ToString(SystemState_t state)
 {
@@ -351,7 +343,7 @@ static void Logger_Task(uint32_t now)
 	            state_text);
 	    }
 
-	    (void)App_UartTransmit(buffer);
+	    (void)UartTx_QueueString(buffer);
 }
 
 static void Scheduler_Run(void)
@@ -367,70 +359,6 @@ static void Scheduler_Run(void)
     Servo_Update(system_state);
 }
 
-static void App_RunStartupSelfTest(void)
-{
-    HAL_StatusTypeDef oled_ready_status;
-    HAL_StatusTypeDef rtc_ready_status;
-    HAL_StatusTypeDef rtc_read_status;
-
-    uint8_t test_hour = 0U;
-    uint8_t test_minute = 0U;
-    uint8_t test_second = 0U;
-
-    char buffer[160];
-
-    oled_ready_status =
-        HAL_I2C_IsDeviceReady(
-            app_i2c,
-            (0x3CU << 1),
-            2U,
-            20U);
-
-    rtc_ready_status =
-        HAL_I2C_IsDeviceReady(
-            app_i2c,
-            (0x68U << 1),
-            2U,
-            20U);
-
-    rtc_read_status =
-        DS3231_ReadTime(
-            &test_hour,
-            &test_minute,
-            &test_second);
-
-    if (rtc_read_status == HAL_OK)
-    {
-        rtc_hour = test_hour;
-        rtc_minute = test_minute;
-        rtc_second = test_second;
-        rtc_ok = 1U;
-    }
-    else
-    {
-        rtc_ok = 0U;
-    }
-
-    snprintf(
-        buffer,
-        sizeof(buffer),
-        "I2C TEST OLED=%d RTC=%d READ=%d "
-        "ERR=0x%08lX TIME=%02u:%02u:%02u\r\n",
-        (int)oled_ready_status,
-        (int)rtc_ready_status,
-        (int)rtc_read_status,
-        (unsigned long)HAL_I2C_GetError(app_i2c),
-        test_hour,
-        test_minute,
-        test_second);
-
-    HAL_UART_Transmit(
-        app_uart,
-        (uint8_t *)buffer,
-        strlen(buffer),
-        100U);
-}
-
 void App_Init(const AppHardware_t *hardware)
 {
     if ((hardware == NULL) ||
@@ -443,9 +371,6 @@ void App_Init(const AppHardware_t *hardware)
     {
         return;
     }
-
-    app_i2c = hardware->i2c;
-    app_uart = hardware->uart;
 
     system_state = SYSTEM_SENSOR_ERROR;
 
@@ -485,90 +410,19 @@ void App_Init(const AppHardware_t *hardware)
 
     ssd1306_Init();
 
-    App_RunStartupSelfTest();
+    SelfTest_RunStartup(
+        hardware->i2c,
+        hardware->uart,
+        &rtc_hour,
+        &rtc_minute,
+        &rtc_second,
+        &rtc_ok);
 
     app_initialized = 1U;
 }
 
 
 
-void App_SetUartTxQueue(
-    osMessageQueueId_t queue)
-{
-    app_uart_tx_queue = queue;
-}
-HAL_StatusTypeDef App_UartTransmit(
-    const char *text)
-{
-    size_t length;
-
-    if (text == NULL)
-    {
-        return HAL_ERROR;
-    }
-
-    length = strlen(text);
-
-    /*
-     * 문자열은 마지막 NULL 공간을 고려해
-     * 최대 159Byte까지만 전송한다.
-     */
-    if (length >= UART_TX_MESSAGE_SIZE)
-    {
-        length =
-            UART_TX_MESSAGE_SIZE - 1U;
-    }
-
-    if (length == 0U)
-    {
-        return HAL_ERROR;
-    }
-
-    return App_UartTransmitBytes(
-        (const uint8_t *)text,
-        (uint16_t)length);
-}
-
-HAL_StatusTypeDef App_UartTransmitBytes(
-    const uint8_t *data,
-    uint16_t length)
-{
-  UartTxMessage_t tx_message =
-  {
-    0
-  };
-
-  if ((data == NULL) ||
-      (length == 0U) ||
-      (length >= UART_TX_MESSAGE_SIZE) ||
-      (app_uart_tx_queue == NULL))
-  {
-    return HAL_ERROR;
-  }
-
-  /*
-   * Binary 데이터에는 0x00이 들어갈 수 있으므로
-   * strlen()을 절대 사용하지 않는다.
-   */
-  (void)memcpy(
-      tx_message.data,
-      data,
-      length);
-
-  tx_message.length =
-      length;
-
-  if (osMessageQueuePut(
-          app_uart_tx_queue,
-          &tx_message,
-          0U,
-          20U) != osOK)
-  {
-    return HAL_BUSY;
-  }
-
-  return HAL_OK;
-}
 void App_Run(void)
 {
     if (app_initialized == 0U)
