@@ -252,109 +252,7 @@ Python에서 실제 Byte 배열을 전송하고, MCU에서는 종료 문자가 �
 자세한 원인 분석과 검증 과정은  
 [핵심 문제 해결 상세 문서](docs/troubleshooting.md)에서 확인할 수 있습니다.
 
-### 3. 여러 Task의 UART 송신을 Single Writer 구조로 통합
 
-#### 문제 상황
-
-센서 로그, 상태 출력, 명령 응답 등 여러 Task에서 UART 송신이 필요해지면서  
-각 Task가 직접 `HAL_UART_Transmit_DMA()`를 호출할 경우 다음 문제가 발생할 수 있었습니다.
-
-- 이전 DMA 송신이 끝나기 전에 새로운 송신 요청 발생
-- `HAL_BUSY` 반환으로 메시지 누락
-- 송신 Buffer가 DMA 완료 전에 변경되는 문제
-- 여러 로그와 Binary Frame이 섞이는 문제
-- 송신 완료를 기다리는 코드가 각 Task에 중복되는 문제
-
-특히 Text 로그와 Binary Protocol 응답을 동시에 지원하면서  
-송신 순서와 Buffer 수명을 한곳에서 관리할 필요가 있었습니다.
-
-#### 원인 분석
-
-UART와 DMA는 여러 Task가 동시에 독립적으로 사용할 수 있는 자원이 아닙니다.
-
-각 Task가 UART 상태를 개별적으로 확인하고 송신하면  
-Task 전환 시점에 따라 UART 사용 상태가 달라질 수 있으며,  
-송신 완료 처리와 다음 송신 시작 순서도 복잡해집니다.
-
-Mutex로 UART 접근만 보호할 수도 있지만, 각 Task가 DMA 완료까지 기다리면  
-송신 관리 코드가 여러 위치에 분산되고 Task의 Blocking 시간이 증가할 수 있다고 판단했습니다.
-
-#### 수정 방법
-
-UART 송신을 담당하는 전용 `uartTxTask`를 만들고,  
-다른 Task는 UART HAL 함수를 직접 호출하지 않도록 구성했습니다.
-
-```text
-여러 Task
-→ UartTxMessage_t 생성
-→ uartTxQueue 등록
-→ uartTxTask가 순서대로 수신
-→ HAL_UART_Transmit_DMA() 실행
-→ DMA 완료 ISR
-→ Direct Task Notification
-→ 다음 메시지 송신
-```
-
-송신 요청은 길이와 실제 데이터를 함께 가진 구조체로 Queue에 복사합니다.
-
-```c
-typedef struct
-{
-    uint16_t length;
-    char data[160];
-} UartTxMessage_t;
-```
-
-이를 통해 호출한 Task의 지역 Buffer가 사라지거나 변경되더라도  
-Queue에 복사된 데이터는 송신 완료까지 안전하게 유지됩니다.
-
-DMA 송신 완료 Callback에서는 복잡한 처리를 하지 않고  
-`uartTxTask`에 Direct Task Notification만 전달하도록 구성했습니다.
-
-#### 적용 구조
-
-- `uartTxQueue` 길이: 4개
-- 메시지 최대 크기: 160Byte
-- 실제 UART DMA 호출 주체: `uartTxTask` 하나
-- DMA 완료 전달 방식: Direct Task Notification
-- Queue 등록 실패 시 `TX FAIL` 통계 증가
-
-```mermaid
-flowchart LR
-    APP[appTask] --> TXQ[uartTxQueue]
-    CMD[commandTask] --> TXQ
-    MON[monitorTask] --> TXQ
-    PROTOCOL[Binary Protocol] --> TXQ
-
-    TXQ --> TXTASK[uartTxTask]
-    TXTASK -->|HAL_UART_Transmit_DMA| DMA[USART2 TX DMA]
-    DMA -->|송신 완료 Callback| NOTIFY[Direct Task Notification]
-    NOTIFY --> TXTASK
-```
-
-#### 검증 방법
-
-- Text 로그와 Binary Protocol 응답을 함께 발생시켜 송신 상태 확인
-- Python Binary Protocol 자동 테스트 11개를 10회 반복
-- `PKT STAT` 명령으로 TX Queue 등록 실패 횟수 확인
-- FreeRTOS Stack과 Heap 사용량을 함께 확인
-
-#### 검증 결과
-
-- 자동 테스트 총 110/110 통과
-- UART TX Queue Failure 0회
-- UART RX Drop 0회
-- Binary Frame 응답 순서 정상 유지
-- 반복 시험 후 Free Heap과 Minimum Free Heap 5,464Byte 유지
-- `uartTxTask` Stack 여유 160Word 확인
-
-#### 배운 점
-
-공유 자원 문제는 단순히 Mutex를 추가하는 것만이 해결책은 아니라는 점을 배웠습니다.
-
-UART 송신처럼 요청 순서, Buffer 수명, 완료 이벤트를 함께 관리해야 하는 기능은  
-전용 Task 하나만 실제 하드웨어에 접근하도록 제한하는 Single Writer 구조가  
-책임 분리와 디버깅 측면에서 더 적합하다는 것을 확인했습니다.
 
 ## 검증 결과
 
@@ -375,120 +273,26 @@ Python 자동 테스트와 오류 주입 시험을 통해 통신 및 장애 복�
 
 ## 현재 한계와 향후 개선 계획
 
+현재 프로젝트는 기능 구현과 오류 복구 검증까지 완료했지만,
+다음과 같은 한계가 있습니다.
+
 ### 현재 한계
 
-#### 1. 최근 요청 1개만 Cache
+- Duplicate Request Cache는 가장 최근 Transaction 1개만 보관
+- Watchdog Health Monitoring은 일부 주요 Task만 대상으로 적용
+- Protocol 통계는 RAM Counter로 관리되어 Reset 시 초기화
+- 자동 테스트는 단일 NUCLEO-F401RE와 UART 연결 환경 중심으로 수행
+- `eventTask`, `monitorTask`는 Stack High Water Mark가 각각 24Word, 22Word로 측정되어 기능 확장 시 재측정 필요
 
-현재 중복 요청 방지는 가장 최근에 처리한 요청과 응답 한 쌍만 저장합니다.
+### 향후 개선
 
-따라서 여러 요청이 짧은 시간에 연속으로 처리된 뒤 이전 요청이 다시 도착하면,  
-Cache에서 제거된 요청은 새로운 요청으로 처리될 수 있습니다.
+- 여러 요청을 일정 시간 보관하는 다중 Transaction Cache 적용
+- Task별 실행 주기를 고려한 Health Timeout 기반 Watchdog 확장
+- Parser Fuzz Test, 경계값, Queue 포화, 장시간 반복 통신 시험 추가
+- Protocol 로직을 하드웨어 의존 코드와 분리해 Host 환경 Unit Test 적용
 
-#### 2. 일부 주요 Task만 Watchdog Health 확인
-
-현재 `appTask`, `consumerTask`, `monitorTask`의 Health Bit를 확인한 뒤  
-조건을 만족한 경우에만 IWDG를 갱신합니다.
-
-`commandTask`, `uartTxTask` 등 모든 Task를 개별적으로 감시하는 구조는 아니므로,  
-향후 각 Task의 실행 주기와 역할에 맞는 Health Timeout을 적용할 필요가 있습니다.
-
-#### 3. 통신 통계는 RAM에서만 관리
-
-`VALID`, `DUPLICATE`, `CRC ERROR`, `TIMEOUT`, `RX DROP`, `TX FAIL` 통계는  
-현재 실행 중인 RAM Counter로 관리합니다.
-
-따라서 전원이 꺼지거나 Watchdog Reset이 발생하면 누적 통계가 초기화됩니다.
-
-#### 4. 테스트 환경이 단일 보드와 UART 연결 중심
-
-자동 테스트는 NUCLEO-F401RE 한 대와 PC의 UART 연결 환경에서 수행했습니다.
-
-다음과 같은 환경까지는 아직 충분히 검증하지 못했습니다.
-
-- 장시간 연속 운전
-- UART Byte 무작위 손상 및 유실
-- TX Queue가 가득 찬 상태
-- 매우 짧은 간격의 연속 Packet 입력
-- 전원 변동과 센서 노이즈가 큰 환경
-- 서보모터 부하가 포함된 장시간 전원 안정성
-
-#### 5. 일부 Task의 Stack 여유가 상대적으로 작음
-
-현재 기능에서는 Stack Overflow가 발생하지 않았지만,  
-`eventTask`와 `monitorTask`의 최소 Stack 여유가 각각 24Word와 22Word로 측정됐습니다.
-
-해당 Task에 지역변수, 문자열 처리, 로그 출력 기능을 추가할 경우  
-Stack 사용량을 다시 측정해야 합니다.
-
-### 향후 개선 계획
-
-#### 1. 다중 Transaction Cache 구현
-
-최근 요청 한 개만 저장하는 방식에서 확장해 여러 Transaction을 보관하고,  
-Sequence와 요청 내용을 기준으로 일정 시간 동안 중복 여부를 판단하도록 개선할 예정입니다.
-
-각 Cache 항목에는 다음 정보를 저장할 수 있습니다.
-
-- 요청 Type
-- Sequence
-- Payload
-- 생성 시각
-- Encoded Response
-- 유효 시간
-
-#### 2. 전체 Task Health Monitoring
-
-각 Task가 자신의 실행 상태를 주기적으로 보고하고,  
-Watchdog Task가 Task별 허용 시간을 개별적으로 검사하도록 확장할 예정입니다.
-
-```text
-Task별 마지막 Health 보고 시각 저장
-→ 현재 Tick과 비교
-→ 허용 시간 초과 Task 식별
-→ 오류 로그 저장
-→ IWDG Refresh 중단
-```
-
-이를 통해 Reset 발생 전 어떤 Task가 정상적으로 동작하지 않았는지  
-더 구체적으로 확인할 수 있습니다.
-
-#### 3. EEPROM 기반 설정 및 오류 기록
-
-현재 RAM에서만 관리하는 통신 통계와 Reset 정보를  
-EEPROM에 저장하도록 개선할 예정입니다.
-
-저장 데이터에는 Version과 CRC를 함께 기록해  
-데이터 형식 변경과 저장 데이터 손상도 확인할 수 있도록 구성할 계획입니다.
-
-#### 4. Protocol 자동 테스트 확대
-
-현재 11개의 기능 및 오류 테스트에서 다음 항목을 추가할 예정입니다.
-
-- 무작위 Byte를 입력하는 Parser Fuzz Test
-- Payload 최대 길이와 경계값 검사
-- 연속 Packet 처리 시험
-- Stream Buffer Overflow 유도 시험
-- TX Queue 포화 시험
-- Sequence 순환 구간 시험
-- 장시간 반복 통신 시험
-
-#### 5. Host 환경 Unit Test
-
-CRC 계산, Packet Encode, Parser State Machine처럼  
-하드웨어 의존성이 낮은 기능을 별도 모듈로 분리해 PC 환경에서도  
-Unit Test를 실행할 수 있도록 개선할 예정입니다.
-
-이를 통해 실제 보드 연결 없이도 Protocol 로직의 변경 사항을  
-빠르게 검증할 수 있습니다.
-
-#### 6. Stack과 Heap 최적화
-
-기능을 추가하기 전에 각 Task의 High Water Mark를 다시 측정하고,  
-특히 여유가 작은 `eventTask`와 `monitorTask`를 우선적으로 점검할 예정입니다.
-
-단순히 Stack 크기를 줄이는 것이 아니라, 최악 조건에서 필요한 사용량을 측정한 뒤  
-안전 여유를 포함해 Stack 크기를 결정할 계획입니다.
-
+상세 테스트 결과와 측정값은
+[검증 및 테스트 상세 문서](docs/test-results.md)에서 확인할 수 있습니다.
 ## 빌드 및 실행 방법
 
 ### 개발 환경
