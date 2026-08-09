@@ -1,24 +1,82 @@
 # STM32 FreeRTOS Sensor Controller
 
-STM32F401RE에서 센서 데이터 수집, 장치 제어, UART 통신을  
-FreeRTOS Task로 분리하고, 통신 오류와 Task 이상이 발생해도  
+STM32F401RE에서 센서 데이터 수집, 장치 제어, UART 통신을
+FreeRTOS Task로 분리하고, 통신 오류와 Task 이상이 발생해도
 검출·복구할 수 있도록 구현한 개인 펌웨어 프로젝트입니다.
 
-단순한 센서 동작 확인을 넘어 UART Binary Protocol의 CRC-16,  
-Parser Timeout, Retry, 중복 요청 방지와 Task Health Monitoring,  
-IWDG 기반 자동 복구 구조를 구현하고 반복 테스트로 안정성을 검증했습니다.
+단순한 센서 동작 확인을 넘어
+**UART Binary Protocol의 오류 처리, RTOS 기반 Task 분리,
+UART DMA 송신 구조, Watchdog 및 Self-Test, 반복 자동 테스트**까지 구현했습니다.
 
-## 주요 결과
+---
 
-- UART Binary Protocol 자동 테스트 11개 구현
-- 11개 테스트를 10회 반복하여 총 110/110 통과
-- 정상 Packet 140개 처리 중 중복 요청 20개 감지 및 응답 재전송
-- CRC 오류 10회와 Parser Timeout 10회 오류 주입 후 정상 복구
-- UART RX Drop 0회, TX Queue Failure 0회
-- FreeRTOS Free Heap과 Minimum Free Heap 5,464Byte 유지
-- HC-SR04 ECHO 단선 시 Sensor Invalid 감지 후 재연결 자동 복구
-- `appTask` 정지 시 IWDG Reset 발생 및 `RESET CAUSE: IWDG` 확인
-- 부팅 시 RTOS 객체, OLED, EEPROM, RTC, 센서 Self-Test 전체 PASS
+## 핵심 구현
+
+- STM32F401RE 기반 HC-SR04 거리 측정 및 OLED·RTC·LED·Buzzer 제어
+- FreeRTOS Task 기반 센서 처리, 명령 파싱, 상태 모니터링, UART 송신 분리
+- Queue, Event Flag, Stream Buffer, Direct Task Notification을 이용한 Task 간 데이터 전달
+- UART Binary Protocol에 CRC-16, Parser Timeout, Retry, Duplicate Request 방지 적용
+- 여러 Task의 UART DMA 충돌을 방지하기 위한 `uartTxTask` Single Writer 구조 적용
+- IWDG 기반 Task Health Monitoring 및 부팅 Self-Test 구현
+
+## 검증 결과
+
+- Python Binary Protocol 자동 테스트 **11개 × 10회 = 110/110 PASS**
+- CRC 오류 및 Parser Timeout 오류 주입 후 다음 정상 Packet 처리 확인
+- Duplicate Request 감지 시 명령 재실행 없이 Cached Response 재전송
+- UART RX Drop **0회**, TX Queue Failure **0회**
+- Free Heap / Minimum Free Heap **5,464 Byte 유지**
+- HC-SR04 ECHO 단선 감지 후 재연결 시 자동 복구
+- `appTask` 정지 시 IWDG Reset 및 `RESET CAUSE: IWDG` 확인
+- RTOS 객체, OLED, EEPROM, RTC, Sensor 부팅 Self-Test PASS
+
+---
+
+## Hardware & Verification
+
+### Hardware Setup
+
+![Hardware Setup](Pic/Board.jpg)
+
+NUCLEO-F401RE에 HC-SR04, SSD1306 OLED, DS3231 RTC 등 주변장치를 연결해
+실제 하드웨어 환경에서 기능과 오류 복구 동작을 검증했습니다.
+
+### I2C Logic Analyzer
+
+![I2C Waveform](Pic/OLED_I2C.png)
+
+로직 애널라이저를 이용해 I2C SCL/SDA 신호와 ACK를 확인하며
+OLED 및 RTC 계열 장치의 실제 통신 상태를 검증했습니다.
+
+### PWM Verification
+
+![PWM Waveform](Pic/pwm.png)
+
+Timer PWM 출력의 약 20ms 주기(약 50Hz)를 로직 애널라이저로 측정해
+설정한 PWM 주기가 실제 핀에서 출력되는 것을 확인했습니다.
+
+### Protocol Automation Test
+
+![Protocol Test](Pic/python_test.png)
+
+Python 테스트 프로그램을 이용해 정상 Packet뿐 아니라 CRC 오류,
+부분 Packet Timeout, Retry, Duplicate Request 등 오류 조건을 자동 검증했습니다.
+
+### Self-Test
+
+![Self Test](Pic/self_test.png)
+
+부팅 및 명령 실행 시 RTOS 객체와 I2C 주변장치,
+센서 준비 상태를 확인하는 Self-Test를 구현했습니다.
+
+### FreeRTOS Memory Monitoring
+
+![FreeRTOS Memory](Pic/mem_10.png)
+
+Free Heap과 각 Task의 Stack High Water Mark를 측정해
+RTOS 자원 사용량을 확인했습니다.
+
+---
 
 ## 프로젝트 목표
 
