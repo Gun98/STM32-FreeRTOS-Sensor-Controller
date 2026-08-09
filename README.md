@@ -36,7 +36,7 @@ UART DMA 송신 구조, Watchdog 및 Self-Test, 반복 자동 테스트**까지 
 
 ### Hardware Setup
 
-![Hardware Setup](Pic/Board.jpg)
+<img src="Pic/Board.jpg" width="600">
 
 NUCLEO-F401RE에 HC-SR04, SSD1306 OLED, DS3231 RTC 등 주변장치를 연결해
 실제 하드웨어 환경에서 기능과 오류 복구 동작을 검증했습니다.
